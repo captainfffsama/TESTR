@@ -15,6 +15,8 @@ from adet.modeling.testr.matcher import build_matcher
 from adet.modeling.testr.models import TESTR
 from adet.utils.misc import NestedTensor, box_xyxy_to_cxcywh
 
+import debug_tools as D
+
 
 class Joiner(nn.Sequential):
     def __init__(self, backbone, position_embedding):
@@ -31,8 +33,10 @@ class Joiner(nn.Sequential):
 
         return out, pos
 
+
 class MaskedBackbone(nn.Module):
-    """ This is a thin wrapper around D2's backbone to provide padding masking"""
+    """This is a thin wrapper around D2's backbone to provide padding masking"""
+
     def __init__(self, cfg):
         super().__init__()
         self.backbone = build_backbone(cfg)
@@ -57,7 +61,9 @@ class MaskedBackbone(nn.Module):
         assert len(feature_shapes) == len(self.feature_strides)
         for idx, shape in enumerate(feature_shapes):
             N, _, H, W = shape
-            masks_per_feature_level = torch.ones((N, H, W), dtype=torch.bool, device=device)
+            masks_per_feature_level = torch.ones(
+                (N, H, W), dtype=torch.bool, device=device
+            )
             for img_idx, (h, w) in enumerate(image_sizes):
                 masks_per_feature_level[
                     img_idx,
@@ -70,10 +76,13 @@ class MaskedBackbone(nn.Module):
 
 def detector_postprocess(results, output_height, output_width, mask_threshold=0.5):
     """
-    In addition to the post processing of detectron2, we add scalign for 
+    In addition to the post processing of detectron2, we add scalign for
     bezier control points.
     """
-    scale_x, scale_y = (output_width / results.image_size[1], output_height / results.image_size[0])
+    scale_x, scale_y = (
+        output_width / results.image_size[1],
+        output_height / results.image_size[0],
+    )
     # results = d2_postprocesss(results, output_height, output_width, mask_threshold)
 
     # scale bezier points
@@ -106,10 +115,11 @@ class TransformerDetector(nn.Module):
     Same as :class:`detectron2.modeling.ProposalNetwork`.
     Use one stage detector and a second stage for instance-wise prediction.
     """
+
     def __init__(self, cfg):
         super().__init__()
         self.device = torch.device(cfg.MODEL.DEVICE)
-        
+
         d2_backbone = MaskedBackbone(cfg)
         N_steps = cfg.MODEL.TRANSFORMER.HIDDEN_DIM // 2
         self.test_score_threshold = cfg.MODEL.TRANSFORMER.INFERENCE_TH_TEST
@@ -119,27 +129,41 @@ class TransformerDetector(nn.Module):
         self.testr = TESTR(cfg, backbone)
 
         box_matcher, point_matcher = build_matcher(cfg)
-        
+
         loss_cfg = cfg.MODEL.TRANSFORMER.LOSS
-        weight_dict = {'loss_ce': loss_cfg.POINT_CLASS_WEIGHT, 'loss_ctrl_points': loss_cfg.POINT_COORD_WEIGHT, 'loss_texts': loss_cfg.POINT_TEXT_WEIGHT}
-        enc_weight_dict = {'loss_bbox': loss_cfg.BOX_COORD_WEIGHT, 'loss_giou': loss_cfg.BOX_GIOU_WEIGHT, 'loss_ce': loss_cfg.BOX_CLASS_WEIGHT}
+        weight_dict = {
+            "loss_ce": loss_cfg.POINT_CLASS_WEIGHT,
+            "loss_ctrl_points": loss_cfg.POINT_COORD_WEIGHT,
+            "loss_texts": loss_cfg.POINT_TEXT_WEIGHT,
+        }
+        enc_weight_dict = {
+            "loss_bbox": loss_cfg.BOX_COORD_WEIGHT,
+            "loss_giou": loss_cfg.BOX_GIOU_WEIGHT,
+            "loss_ce": loss_cfg.BOX_CLASS_WEIGHT,
+        }
         if loss_cfg.AUX_LOSS:
             aux_weight_dict = {}
             # decoder aux loss
             for i in range(cfg.MODEL.TRANSFORMER.DEC_LAYERS - 1):
-                aux_weight_dict.update(
-                    {k + f'_{i}': v for k, v in weight_dict.items()})
+                aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
             # encoder aux loss
-            aux_weight_dict.update(
-                {k + f'_enc': v for k, v in enc_weight_dict.items()})
+            aux_weight_dict.update({k + f"_enc": v for k, v in enc_weight_dict.items()})
             weight_dict.update(aux_weight_dict)
 
-        enc_losses = ['labels', 'boxes']
-        dec_losses = ['labels', 'ctrl_points', 'texts']
+        enc_losses = ["labels", "boxes"]
+        dec_losses = ["labels", "ctrl_points", "texts"]
 
-        self.criterion = SetCriterion(self.testr.num_classes, box_matcher, point_matcher,
-                                      weight_dict, enc_losses, dec_losses, self.testr.num_ctrl_points, 
-                                      focal_alpha=loss_cfg.FOCAL_ALPHA, focal_gamma=loss_cfg.FOCAL_GAMMA)
+        self.criterion = SetCriterion(
+            self.testr.num_classes,
+            box_matcher,
+            point_matcher,
+            weight_dict,
+            enc_losses,
+            dec_losses,
+            self.testr.num_ctrl_points,
+            focal_alpha=loss_cfg.FOCAL_ALPHA,
+            focal_gamma=loss_cfg.FOCAL_GAMMA,
+        )
 
         pixel_mean = torch.Tensor(cfg.MODEL.PIXEL_MEAN).to(self.device).view(3, 1, 1)
         pixel_std = torch.Tensor(cfg.MODEL.PIXEL_STD).to(self.device).view(3, 1, 1)
@@ -193,9 +217,13 @@ class TransformerDetector(nn.Module):
             ctrl_point_cls = output["pred_logits"]
             ctrl_point_coord = output["pred_ctrl_points"]
             text_pred = output["pred_texts"]
-            results = self.inference(ctrl_point_cls, ctrl_point_coord, text_pred, images.image_sizes)
+            results = self.inference(
+                ctrl_point_cls, ctrl_point_coord, text_pred, images.image_sizes
+            )
             processed_results = []
-            for results_per_image, input_per_image, image_size in zip(results, batched_inputs, images.image_sizes):
+            for results_per_image, input_per_image, image_size in zip(
+                results, batched_inputs, images.image_sizes
+            ):
                 height = input_per_image.get("height", image_size[0])
                 width = input_per_image.get("width", image_size[1])
                 r = detector_postprocess(results_per_image, height, width)
@@ -206,14 +234,32 @@ class TransformerDetector(nn.Module):
         new_targets = []
         for targets_per_image in targets:
             h, w = targets_per_image.image_size
-            image_size_xyxy = torch.as_tensor([w, h, w, h], dtype=torch.float, device=self.device)
+            image_size_xyxy = torch.as_tensor(
+                [w, h, w, h], dtype=torch.float, device=self.device
+            )
             gt_classes = targets_per_image.gt_classes
             gt_boxes = targets_per_image.gt_boxes.tensor / image_size_xyxy
             gt_boxes = box_xyxy_to_cxcywh(gt_boxes)
-            raw_ctrl_points = targets_per_image.polygons if self.use_polygon else targets_per_image.beziers
-            gt_ctrl_points = raw_ctrl_points.reshape(-1, self.testr.num_ctrl_points, 2) / torch.as_tensor([w, h], dtype=torch.float, device=self.device)[None, None, :]
+            raw_ctrl_points = (
+                targets_per_image.polygons
+                if self.use_polygon
+                else targets_per_image.beziers
+            )
+            gt_ctrl_points = (
+                raw_ctrl_points.reshape(-1, self.testr.num_ctrl_points, 2)
+                / torch.as_tensor([w, h], dtype=torch.float, device=self.device)[
+                    None, None, :
+                ]
+            )
             gt_text = targets_per_image.text
-            new_targets.append({"labels": gt_classes, "boxes": gt_boxes, "ctrl_points": gt_ctrl_points, "texts": gt_text})
+            new_targets.append(
+                {
+                    "labels": gt_classes,
+                    "boxes": gt_boxes,
+                    "ctrl_points": gt_ctrl_points,
+                    "texts": gt_text,
+                }
+            )
         return new_targets
 
     def inference(self, ctrl_point_cls, ctrl_point_coord, text_pred, image_sizes):
@@ -224,9 +270,13 @@ class TransformerDetector(nn.Module):
         prob = ctrl_point_cls.mean(-2).sigmoid()
         scores, labels = prob.max(-1)
 
-        for scores_per_image, labels_per_image, ctrl_point_per_image, text_per_image, image_size in zip(
-            scores, labels, ctrl_point_coord, text_pred, image_sizes
-        ):
+        for (
+            scores_per_image,
+            labels_per_image,
+            ctrl_point_per_image,
+            text_per_image,
+            image_size,
+        ) in zip(scores, labels, ctrl_point_coord, text_pred, image_sizes):
             selector = scores_per_image >= self.test_score_threshold
             scores_per_image = scores_per_image[selector]
             labels_per_image = labels_per_image[selector]

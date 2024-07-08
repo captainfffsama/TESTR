@@ -1,3 +1,8 @@
+.tours/
+.vscode/
+.history/
+test/
+datasets
 # output dir
 output
 instant_test_output
