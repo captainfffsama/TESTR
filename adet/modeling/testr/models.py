@@ -6,34 +6,43 @@ import torch.nn.functional as F
 from adet.layers.deformable_transformer import DeformableTransformer
 
 from adet.layers.pos_encoding import PositionalEncoding1D
-from adet.utils.misc import NestedTensor, inverse_sigmoid_offset, nested_tensor_from_tensor_list, sigmoid_offset
+from adet.utils.misc import (
+    NestedTensor,
+    inverse_sigmoid_offset,
+    nested_tensor_from_tensor_list,
+    sigmoid_offset,
+)
+
 
 class MLP(nn.Module):
-    """ Very simple multi-layer perceptron (also called FFN)"""
+    """Very simple multi-layer perceptron (also called FFN)"""
 
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k)
-                                    for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = nn.ModuleList(
+            nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])
+        )
 
     def forward(self, x):
         for i, layer in enumerate(self.layers):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
 
+
 class TESTR(nn.Module):
     """
     Same as :class:`detectron2.modeling.ProposalNetwork`.
     Use one stage detector and a second stage for instance-wise prediction.
     """
+
     def __init__(self, cfg, backbone):
         super().__init__()
         self.device = torch.device(cfg.MODEL.DEVICE)
 
         self.backbone = backbone
-        
+
         # fmt: off
         self.d_model                 = cfg.MODEL.TRANSFORMER.HIDDEN_DIM
         self.nhead                   = cfg.MODEL.TRANSFORMER.NHEADS
@@ -56,13 +65,20 @@ class TESTR(nn.Module):
 
         self.text_pos_embed   = PositionalEncoding1D(self.d_model, normalize=True, scale=self.pos_embed_scale)
         # fmt: on
-        
+
         self.transformer = DeformableTransformer(
-            d_model=self.d_model, nhead=self.nhead, num_encoder_layers=self.num_encoder_layers,
-            num_decoder_layers=self.num_decoder_layers, dim_feedforward=self.dim_feedforward,
-            dropout=self.dropout, activation=self.activation, return_intermediate_dec=self.return_intermediate_dec,
-            num_feature_levels=self.num_feature_levels, dec_n_points=self.dec_n_points, 
-            enc_n_points=self.enc_n_points, num_proposals=self.num_proposals,
+            d_model=self.d_model,
+            nhead=self.nhead,
+            num_encoder_layers=self.num_encoder_layers,
+            num_decoder_layers=self.num_decoder_layers,
+            dim_feedforward=self.dim_feedforward,
+            dropout=self.dropout,
+            activation=self.activation,
+            return_intermediate_dec=self.return_intermediate_dec,
+            num_feature_levels=self.num_feature_levels,
+            dec_n_points=self.dec_n_points,
+            enc_n_points=self.enc_n_points,
+            num_proposals=self.num_proposals,
         )
         self.ctrl_point_class = nn.Linear(self.d_model, self.num_classes)
         self.ctrl_point_coord = MLP(self.d_model, self.d_model, 2, 3)
@@ -74,7 +90,6 @@ class TESTR(nn.Module):
         self.ctrl_point_embed = nn.Embedding(self.num_ctrl_points, self.d_model)
         self.text_embed = nn.Embedding(self.max_text_len, self.d_model)
 
-                
         if self.num_feature_levels > 1:
             strides = [8, 16, 32]
             num_channels = [512, 1024, 2048]
@@ -82,27 +97,38 @@ class TESTR(nn.Module):
             input_proj_list = []
             for _ in range(num_backbone_outs):
                 in_channels = num_channels[_]
-                input_proj_list.append(nn.Sequential(
-                    nn.Conv2d(in_channels, self.d_model, kernel_size=1),
-                    nn.GroupNorm(32, self.d_model),
-                ))
+                input_proj_list.append(
+                    nn.Sequential(
+                        nn.Conv2d(in_channels, self.d_model, kernel_size=1),
+                        nn.GroupNorm(32, self.d_model),
+                    )
+                )
             for _ in range(self.num_feature_levels - num_backbone_outs):
-                input_proj_list.append(nn.Sequential(
-                    nn.Conv2d(in_channels, self.d_model,
-                              kernel_size=3, stride=2, padding=1),
-                    nn.GroupNorm(32, self.d_model),
-                ))
+                input_proj_list.append(
+                    nn.Sequential(
+                        nn.Conv2d(
+                            in_channels,
+                            self.d_model,
+                            kernel_size=3,
+                            stride=2,
+                            padding=1,
+                        ),
+                        nn.GroupNorm(32, self.d_model),
+                    )
+                )
                 in_channels = self.d_model
             self.input_proj = nn.ModuleList(input_proj_list)
         else:
             strides = [32]
             num_channels = [2048]
-            self.input_proj = nn.ModuleList([
-                nn.Sequential(
-                    nn.Conv2d(
-                        num_channels[0], self.d_model, kernel_size=1),
-                    nn.GroupNorm(32, self.d_model),
-                )])
+            self.input_proj = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Conv2d(num_channels[0], self.d_model, kernel_size=1),
+                        nn.GroupNorm(32, self.d_model),
+                    )
+                ]
+            )
         self.aux_loss = cfg.MODEL.TRANSFORMER.AUX_LOSS
 
         prior_prob = 0.01
@@ -116,10 +142,13 @@ class TESTR(nn.Module):
             nn.init.constant_(proj[0].bias, 0)
 
         num_pred = self.num_decoder_layers
+        # all obj is the same nn.Linear or MLP
         self.ctrl_point_class = nn.ModuleList(
-            [self.ctrl_point_class for _ in range(num_pred)])
+            [self.ctrl_point_class for _ in range(num_pred)]
+        )
         self.ctrl_point_coord = nn.ModuleList(
-            [self.ctrl_point_coord for _ in range(num_pred)])
+            [self.ctrl_point_coord for _ in range(num_pred)]
+        )
         self.transformer.decoder.bbox_embed = None
 
         nn.init.constant_(self.bbox_coord.layers[-1].bias.data[2:], 0.0)
@@ -128,23 +157,23 @@ class TESTR(nn.Module):
 
         self.to(self.device)
 
-
     def forward(self, samples: NestedTensor):
-        """ The forward expects a NestedTensor, which consists of:
-               - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
-               - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
-            It returns a dict with the following elements:
-               - "pred_logits": the classification logits (including no-object) for all queries.
-                                Shape= [batch_size x num_queries x (num_classes + 1)]
-               - "pred_keypoints": The normalized keypoint coordinates for all queries, represented as
-                               (x, y). These values are normalized in [0, 1],
-                               relative to the size of each individual image (disregarding possible padding).
-                               See PostProcess for information on how to retrieve the unnormalized bounding box.
-               - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
-                                dictionnaries containing the two above keys for each decoder layer.
+        """The forward expects a NestedTensor, which consists of:
+           - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
+           - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
+        It returns a dict with the following elements:
+           - "pred_logits": the classification logits (including no-object) for all queries.
+                            Shape= [batch_size x num_queries x (num_classes + 1)]
+           - "pred_keypoints": The normalized keypoint coordinates for all queries, represented as
+                           (x, y). These values are normalized in [0, 1],
+                           relative to the size of each individual image (disregarding possible padding).
+                           See PostProcess for information on how to retrieve the unnormalized bounding box.
+           - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
+                            dictionnaries containing the two above keys for each decoder layer.
         """
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
+        # use last 3 stage as feature
         features, pos = self.backbone(samples)
 
         if self.num_feature_levels == 1:
@@ -155,31 +184,58 @@ class TESTR(nn.Module):
         masks = []
         for l, feat in enumerate(features):
             src, mask = feat.decompose()
+            # input_proj is conv+group norm
             srcs.append(self.input_proj[l](src))
             masks.append(mask)
             assert mask is not None
         if self.num_feature_levels > len(srcs):
             _len_srcs = len(srcs)
+            # 这里将最小的层特征又过了一个conv 下采样
             for l in range(_len_srcs, self.num_feature_levels):
                 if l == _len_srcs:
                     src = self.input_proj[l](features[-1].tensors)
                 else:
                     src = self.input_proj[l](srcs[-1])
                 m = masks[0]
-                mask = F.interpolate(
-                    m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
+                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(
+                    torch.bool
+                )[0]
+                # each feature add pos coding
                 pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
                 srcs.append(src)
                 masks.append(mask)
                 pos.append(pos_l)
 
         # n_points, embed_dim --> n_objects, n_points, embed_dim
-        ctrl_point_embed = self.ctrl_point_embed.weight[None, ...].repeat(self.num_proposals, 1, 1)
-        text_pos_embed = self.text_pos_embed(self.text_embed.weight)[None, ...].repeat(self.num_proposals, 1, 1)
+        ctrl_point_embed = self.ctrl_point_embed.weight[None, ...].repeat(
+            self.num_proposals, 1, 1
+        )
+        text_pos_embed = self.text_pos_embed(self.text_embed.weight)[None, ...].repeat(
+            self.num_proposals, 1, 1
+        )
         text_embed = self.text_embed.weight[None, ...].repeat(self.num_proposals, 1, 1)
 
-        hs, hs_text, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = self.transformer(
-            srcs, masks, pos, ctrl_point_embed, text_embed, text_pos_embed, text_mask=None)
+        # transformer one encoder,two decoder
+        # hs: b,topk,16,c
+        # hs_text: b,topk,max_len,c
+        # init_reference: b,topk,4
+        # inter_references:decoder layer num,b,topk,4
+        (
+            hs,
+            hs_text,
+            init_reference,  # reference point
+            inter_references,
+            enc_outputs_class,
+            enc_outputs_coord_unact,
+        ) = self.transformer(
+            srcs,  # origin image feature
+            masks,  # origin image mask,to same shape
+            pos,  # origin image feature pos code
+            ctrl_point_embed,  # control point query
+            text_embed,  # text query
+            text_pos_embed,  # text pose embed
+            text_mask=None,
+        )
 
         outputs_classes = []
         outputs_coords = []
@@ -205,16 +261,21 @@ class TESTR(nn.Module):
         outputs_coord = torch.stack(outputs_coords)
         outputs_text = torch.stack(outputs_texts)
 
-        out = {'pred_logits': outputs_class[-1],
-               'pred_ctrl_points': outputs_coord[-1],
-               'pred_texts': outputs_text[-1]}
+        out = {
+            "pred_logits": outputs_class[-1],
+            "pred_ctrl_points": outputs_coord[-1],
+            "pred_texts": outputs_text[-1],
+        }
         if self.aux_loss:
-            out['aux_outputs'] = self._set_aux_loss(
-                outputs_class, outputs_coord, outputs_text)
+            out["aux_outputs"] = self._set_aux_loss(
+                outputs_class, outputs_coord, outputs_text
+            )
 
         enc_outputs_coord = enc_outputs_coord_unact.sigmoid()
-        out['enc_outputs'] = {
-            'pred_logits': enc_outputs_class, 'pred_boxes': enc_outputs_coord}
+        out["enc_outputs"] = {
+            "pred_logits": enc_outputs_class,
+            "pred_boxes": enc_outputs_coord,
+        }
         return out
 
     @torch.jit.unused
@@ -222,5 +283,9 @@ class TESTR(nn.Module):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [{'pred_logits': a, 'pred_ctrl_points': b, 'pred_texts': c}
-                for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], outputs_text[:-1])]
+        return [
+            {"pred_logits": a, "pred_ctrl_points": b, "pred_texts": c}
+            for a, b, c in zip(
+                outputs_class[:-1], outputs_coord[:-1], outputs_text[:-1]
+            )
+        ]

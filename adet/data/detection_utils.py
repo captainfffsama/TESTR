@@ -71,6 +71,7 @@ def annotations_to_instances(annos, image_size, mask_format="polygon"):
 
     if "polygons" in annos[0]:
         polys = [obj.get("polygons", []) for obj in annos]
+        polys=np.stack(polys)
         instance.polygons = torch.as_tensor(polys, dtype=torch.float32)
 
     return instance

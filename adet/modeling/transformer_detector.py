@@ -120,6 +120,7 @@ class TransformerDetector(nn.Module):
         super().__init__()
         self.device = torch.device(cfg.MODEL.DEVICE)
 
+        # ResNet with masked
         d2_backbone = MaskedBackbone(cfg)
         N_steps = cfg.MODEL.TRANSFORMER.HIDDEN_DIM // 2
         self.test_score_threshold = cfg.MODEL.TRANSFORMER.INFERENCE_TH_TEST
