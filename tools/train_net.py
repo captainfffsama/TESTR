@@ -25,7 +25,13 @@ from torch.nn.parallel import DistributedDataParallel
 
 import detectron2.utils.comm as comm
 from detectron2.data import MetadataCatalog, build_detection_train_loader
-from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, hooks, launch
+from detectron2.engine import (
+    DefaultTrainer,
+    default_argument_parser,
+    default_setup,
+    hooks,
+    launch,
+)
 from detectron2.utils.events import EventStorage
 from detectron2.evaluation import (
     COCOEvaluator,
@@ -51,6 +57,7 @@ class Trainer(DefaultTrainer):
     This is the same Trainer except that we rewrite the
     `build_train_loader`/`resume_or_load` method.
     """
+
     def build_hooks(self):
         """
         Replace `DetectionCheckpointer` with `AdetCheckpointer`.
@@ -67,11 +74,15 @@ class Trainer(DefaultTrainer):
                     optimizer=self.optimizer,
                     scheduler=self.scheduler,
                 )
-                ret[i] = hooks.PeriodicCheckpointer(self.checkpointer, self.cfg.SOLVER.CHECKPOINT_PERIOD)
+                ret[i] = hooks.PeriodicCheckpointer(
+                    self.checkpointer, self.cfg.SOLVER.CHECKPOINT_PERIOD
+                )
         return ret
 
     def resume_or_load(self, resume=True):
-        checkpoint = self.checkpointer.resume_or_load(self.cfg.MODEL.WEIGHTS, resume=resume)
+        checkpoint = self.checkpointer.resume_or_load(
+            self.cfg.MODEL.WEIGHTS, resume=resume
+        )
         if resume and self.checkpointer.has_checkpoint():
             self.start_iter = checkpoint.get("iteration", -1) + 1
 
@@ -217,7 +228,9 @@ class Trainer(DefaultTrainer):
 
             class FullModelGradientClippingOptimizer(optim):
                 def step(self, closure=None):
-                    all_params = itertools.chain(*[x["params"] for x in self.param_groups])
+                    all_params = itertools.chain(
+                        *[x["params"] for x in self.param_groups]
+                    )
                     torch.nn.utils.clip_grad_norm_(all_params, clip_norm_val)
                     super().step(closure=closure)
 
@@ -263,7 +276,7 @@ def main(args):
         AdetCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
             cfg.MODEL.WEIGHTS, resume=args.resume
         )
-        res = Trainer.test(cfg, model) # d2 defaults.py
+        res = Trainer.test(cfg, model)  # d2 defaults.py
         if comm.is_main_process():
             verify_results(cfg, res)
         if cfg.TEST.AUG.ENABLED:

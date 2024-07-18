@@ -58,8 +58,8 @@ class SetCriterion(nn.Module):
         """
         super().__init__()
         self.num_classes = num_classes
-        self.enc_matcher = enc_matcher
-        self.dec_matcher = dec_matcher
+        self.enc_matcher = enc_matcher # BoxHungarianMatcher
+        self.dec_matcher = dec_matcher # CtrlPointHungarianMatcher
         self.weight_dict = weight_dict
         self.enc_losses = enc_losses
         self.dec_losses = dec_losses
@@ -192,7 +192,7 @@ class SetCriterion(nn.Module):
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs' and k != 'enc_outputs'}
-        
+
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.dec_matcher(outputs_without_aux, targets)
 
