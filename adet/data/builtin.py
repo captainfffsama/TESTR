@@ -4,6 +4,7 @@ from detectron2.data.datasets.register_coco import register_coco_instances
 from detectron2.data.datasets.builtin_meta import _get_builtin_metadata
 
 from .datasets.text import register_text_instances
+from .datasets.num_point import register_number_point_instances
 
 # register plane reconstruction
 
@@ -28,8 +29,8 @@ _PREDEFINED_SPLITS_TEXT = {
     "rects_train": ("ReCTS/ReCTS_train_images", "ReCTS/annotations/rects_train.json"),
     "rects_val": ("ReCTS/ReCTS_val_images", "ReCTS/annotations/rects_val.json"),
     "rects_test": ("ReCTS/ReCTS_test_images", "ReCTS/annotations/rects_test.json"),
-    "art_train": ("ArT/rename_artimg_train", "ArT/annotations/abcnet_art_train.json"), 
-    "lsvt_train": ("LSVT/rename_lsvtimg_train", "LSVT/annotations/abcnet_lsvt_train.json"), 
+    "art_train": ("ArT/rename_artimg_train", "ArT/annotations/abcnet_art_train.json"),
+    "lsvt_train": ("LSVT/rename_lsvtimg_train", "LSVT/annotations/abcnet_lsvt_train.json"),
     "chnsyn_train": ("ChnSyn/syn_130k_images", "ChnSyn/annotations/chn_syntext.json"),
     # datasets with polygon annotations
     "totaltext_poly_train": ("totaltext/train_images", "totaltext/train_poly.json"),
@@ -50,8 +51,12 @@ metadata_text = {
     "thing_classes": ["text"]
 }
 
+_CUSTOM_LABELME_DATASETS={
+    "number_point": ("bj_read_num/data")
+}
 
-def register_all_coco(root="datasets"):
+
+def register_all_coco(root="datasets") -> None:
     for key, (image_root, json_file) in _PREDEFINED_SPLITS_PIC.items():
         # Assume pre-defined datasets live in `./datasets`.
         register_coco_instances(
@@ -68,6 +73,9 @@ def register_all_coco(root="datasets"):
             os.path.join(root, json_file) if "://" not in json_file else json_file,
             os.path.join(root, image_root),
         )
+
+    for key,v in _CUSTOM_LABELME_DATASETS.items():
+        register_number_point_instances(key,os.path.join(root,v))
 
 
 register_all_coco()

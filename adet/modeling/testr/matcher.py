@@ -7,6 +7,7 @@ from torch import nn
 from adet.utils.misc import box_cxcywh_to_xyxy, generalized_box_iou
 
 
+
 class CtrlPointHungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
     For efficiency reasons, the targets don't include the no_object. Because of this, in general,
@@ -16,7 +17,7 @@ class CtrlPointHungarianMatcher(nn.Module):
 
     def __init__(self,
                  class_weight: float = 1,
-                 coord_weight: float = 1, 
+                 coord_weight: float = 1,
                  focal_alpha: float = 0.25,
                  focal_gamma: float = 2.0):
         """Creates the matcher
@@ -66,7 +67,7 @@ class CtrlPointHungarianMatcher(nn.Module):
             cost_class = (pos_cost_class[..., 0] - neg_cost_class[..., 0]).mean(-1, keepdims=True)
 
             cost_kpts = torch.cdist(out_pts, tgt_pts, p=1)
-            
+
             C = self.class_weight * cost_class + self.coord_weight * cost_kpts
             C = C.view(bs, num_queries, -1).cpu()
 
@@ -75,6 +76,50 @@ class CtrlPointHungarianMatcher(nn.Module):
                 c[i]) for i, c in enumerate(C.split(sizes, -1))]
             return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
+class ProposalHungarianMatcher(CtrlPointHungarianMatcher):
+    def forward(self, outputs, targets):
+        """ Performs the matching
+        Params:
+            outputs: This is a dict that contains at least these entries:
+                 "pred_logits": Tensor of dim [batch_size, num_queries, num_classes] with the classification logits
+                 "pred_boxes": Tensor of dim [batch_size, num_queries, 4] with the predicted box coordinates
+            targets: This is a list of targets (len(targets) = batch_size), where each target is a dict containing:
+                 "labels": Tensor of dim [num_target_boxes] (where num_target_boxes is the number of ground-truth
+                           objects in the target) containing the class labels
+                 "boxes": Tensor of dim [num_target_boxes, 4] containing the target box coordinates
+        Returns:
+            A list of size batch_size, containing tuples of (index_i, index_j) where:
+                - index_i is the indices of the selected predictions (in order)
+                - index_j is the indices of the corresponding selected targets (in order)
+            For each batch element, it holds:
+                len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
+        """
+        with torch.no_grad():
+            bs, num_queries = outputs["pred_logits"].shape[:2]
+
+            # We flatten to compute the cost matrices in a batch
+            out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()
+            # [batch_size, n_queries, n_points, 2] --> [batch_size * num_queries, n_points * 2]
+            out_pts = outputs["pred_proposals"].flatten(0, 1)
+
+            # Also concat the target labels and boxes
+            tgt_pts = torch.cat([v["ctrl_points"] for v in targets]).flatten(-2)
+            neg_cost_class = (1 - self.alpha) * (out_prob ** self.gamma) * \
+                (-(1 - out_prob + 1e-8).log())
+            pos_cost_class = self.alpha * \
+                ((1 - out_prob) ** self.gamma) * (-(out_prob + 1e-8).log())
+            # FIXME: hack here for label ID 0
+            cost_class = (pos_cost_class[..., 0] - neg_cost_class[..., 0]).mean(-1, keepdims=True)
+
+            cost_kpts = torch.cdist(out_pts, tgt_pts, p=1)
+
+            C = self.class_weight * cost_class + self.coord_weight * cost_kpts
+            C = C.view(bs, num_queries, -1).cpu()
+
+            sizes = [len(v["ctrl_points"]) for v in targets]
+            indices = [linear_sum_assignment(
+                c[i]) for i, c in enumerate(C.split(sizes, -1))]
+            return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 class BoxHungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
@@ -86,7 +131,7 @@ class BoxHungarianMatcher(nn.Module):
     def __init__(self,
                  class_weight: float = 1,
                  coord_weight: float = 1,
-                 giou_weight: float = 1, 
+                 giou_weight: float = 1,
                  focal_alpha: float = 0.25,
                  focal_gamma: float = 2.0):
         """Creates the matcher

@@ -105,7 +105,7 @@ class DeformableTransformer(nn.Module):
         proposals = proposals.sigmoid() * scale
         # N, L, 4, 64
         pos = proposals[:, :, :, None] / dim_t
-        # N, L, 4, 64, 2
+        # N, L, 4, 32, 2 -> N,L,256
         pos = torch.stack(
             (pos[:, :, :, 0::2].sin(), pos[:, :, :, 1::2].cos()), dim=4
         ).flatten(2)
@@ -278,6 +278,9 @@ class DeformableTransformer(nn.Module):
         query_pos = self.pos_trans_norm(
             self.pos_trans(self.get_proposal_pos_embed(topk_coords_unact))
         )
+        # query_pos_t=self.get_proposal_pos_embed(topk_coords_unact)
+        # query_pos_t=self.pos_trans(query_pos_t)
+        # query_pos=self.pos_trans_norm(query_pos_t)
         query_embed = query_embed.unsqueeze(0).expand(bs, -1, -1, -1)
         # b,100,c-> b,100,16,c
         query_pos = query_pos[:, :, None, :].repeat(1, 1, query_embed.shape[2], 1)
@@ -878,3 +881,488 @@ def _get_activation_fn(activation):
     if activation == "glu":
         return F.glu
     raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
+
+
+class DeformableTransformerNumPoint(DeformableTransformer):
+    def gen_encoder_output_proposals(
+        self,
+        memory: torch.Tensor,
+        memory_padding_mask: torch.Tensor,
+        spatial_shapes: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """_summary_
+
+        Args:
+            memory (torch.Tensor): b,hw,c image feature
+            memory_padding_mask (torch.Tensor): b,hw padding mask
+            spatial_shapes (torch.Tensor): feature level, size each feature level size
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tenosr]:
+            - output_memory (torch.Tensor): b,all hw,c image feature
+            - output_proposals (torch.Tensor): b,all hw,4 each proposals prior,format is xywh.
+        """
+        N_, S_, C_ = memory.shape  # b,hw,c
+        base_scale = 4.0
+        proposals = []
+        _cur = 0
+        for lvl, (H_, W_) in enumerate(spatial_shapes):
+            # mark the out of image region to 0
+            mask_flatten_ = memory_padding_mask[:, _cur : (_cur + H_ * W_)].view(
+                N_, H_, W_, 1
+            )
+            # cout how much each image padding, shape:b
+            valid_H = torch.sum(~mask_flatten_[:, :, 0, 0], 1)
+            valid_W = torch.sum(~mask_flatten_[:, 0, :, 0], 1)
+
+            # h,w
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(
+                    0, H_ - 1, H_, dtype=torch.float32, device=memory.device
+                ),
+                torch.linspace(
+                    0, W_ - 1, W_, dtype=torch.float32, device=memory.device
+                ),
+            )
+            # current shape level :H,W,2
+            grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)
+
+            scale = torch.cat([valid_W.unsqueeze(-1), valid_H.unsqueeze(-1)], 1).view(
+                N_, 1, 1, 2
+            )
+            grid = (grid.unsqueeze(0).expand(N_, -1, -1, -1) + 0.5) / scale
+            proposal = grid.view(N_, -1, 2)
+            proposals.append(proposal)
+            _cur += H_ * W_
+
+        # b,all shape level hw,2
+        output_proposals = torch.cat(proposals, 1)
+        output_proposals_valid = (
+            (output_proposals > 0.01) & (output_proposals < 0.99)
+        ).all(-1, keepdim=True)
+        # QUE: 应用sigmoid 逆函数?
+        output_proposals = torch.log(output_proposals / (1 - output_proposals))
+        output_proposals = output_proposals.masked_fill(
+            memory_padding_mask.unsqueeze(-1), float("inf")
+        )
+        output_proposals = output_proposals.masked_fill(
+            ~output_proposals_valid, float("inf")
+        )
+
+        output_memory = memory
+        output_memory = output_memory.masked_fill(
+            memory_padding_mask.unsqueeze(-1), float(0)
+        )
+        output_memory = output_memory.masked_fill(~output_proposals_valid, float(0))
+        # linea trans -> layer norm
+        output_memory = self.enc_output_norm(self.enc_output(output_memory))
+        return output_memory, output_proposals
+
+    def forward(
+        self,
+        srcs,
+        masks,
+        pos_embeds,  # image feature pos encode
+        query_embed,  # control point query
+        text_embed,  # text feature query
+        text_pos_embed,
+        text_mask=None,
+    ):
+        # prepare input for encoder
+        src_flatten = []
+        mask_flatten = []
+        lvl_pos_embed_flatten = []
+        spatial_shapes = []
+        for lvl, (src, mask, pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
+            bs, c, h, w = src.shape
+            spatial_shape = (h, w)
+            spatial_shapes.append(spatial_shape)
+            src = src.flatten(2).transpose(1, 2)  # b,hw,c
+            mask = mask.flatten(1)
+            pos_embed = pos_embed.flatten(2).transpose(1, 2)
+            # 这是一个可学习的特征层级编码
+            lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+            lvl_pos_embed_flatten.append(lvl_pos_embed)
+            src_flatten.append(src)
+            mask_flatten.append(mask)
+        # 将特征空间维度展平，然后在空间维度上把所有特征堆叠在一起
+        # 空间维度数量h*w 是token数量,通道之前已经统一,是token dim
+        src_flatten = torch.cat(src_flatten, 1)
+        mask_flatten = torch.cat(mask_flatten, 1)
+        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
+        spatial_shapes = torch.as_tensor(
+            spatial_shapes, dtype=torch.long, device=src_flatten.device
+        )
+        level_start_index = torch.cat(
+            (spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1])
+        )
+        valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
+
+        # encoder
+        memory = self.encoder(
+            src_flatten,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+            lvl_pos_embed_flatten,
+            mask_flatten,
+        )
+
+        # prepare input for decoder
+        bs, _, c = memory.shape  # b,hw,c
+        # b,hw,c;b,hw;feature level,size -> b,hw,256;b,hw,4
+        output_memory, output_proposals = self.gen_encoder_output_proposals(
+            memory, mask_flatten, spatial_shapes
+        )
+
+        # hack implementation for two-stage Deformable DETR
+        # here self.bbox_class_embed=nn.Linear(in_features=256, out_features=1, bias=True)
+        # self.bbox_class_embed init in ../../modeling/testr/models.py line 86
+        # self.bbox_class = nn.Linear(self.d_model, self.num_classes)
+        enc_outputs_class = self.bbox_class_embed(output_memory)
+        # here self.bbox_embed is 3 mlp,256 -> 2.
+        # self.bbox_embed init in ../../modeling/testr/models.py line 85
+        # self.bbox_coord = MLP(self.d_model, self.d_model, 2, 3)
+        # enc_outputs_coord_unact: b,hw,2
+        enc_outputs_coord_unact = self.bbox_embed(output_memory) + output_proposals
+
+        topk = self.num_proposals
+        # topk_proposals is the topk proposals index
+        # topk_proposals:b,topk
+        topk_proposals = torch.topk(enc_outputs_class[..., 0], topk, dim=1)[1]
+        # topk_coords_unact: b,topk,2
+        topk_coords_unact = torch.gather(
+            enc_outputs_coord_unact, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 2)
+        )
+        topk_coords_unact = topk_coords_unact.detach()
+        reference_points = topk_coords_unact.sigmoid()
+        init_reference_out = reference_points
+        query_pos = self.pos_trans_norm(
+            self.pos_trans(self.get_proposal_pos_embed(topk_coords_unact))
+        )
+        query_embed = query_embed.unsqueeze(0).expand(bs, -1, -1, -1)
+        # b,100,c-> b,100,16,c
+        query_pos = query_pos[:, :, None, :].repeat(1, 1, query_embed.shape[2], 1)
+        text_embed = text_embed.unsqueeze(0).expand(bs, -1, -1, -1)
+
+        # decoder
+        hs, hs_text, inter_references = self.decoder(
+            query_embed,
+            text_embed,
+            reference_points,
+            memory,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+            query_pos,
+            text_pos_embed,
+            mask_flatten,
+            text_mask,
+        )
+
+        inter_references_out = inter_references
+        # hs: decoder layer num,b,topk,16,256
+        # hs_text: decoder layer num,b,topk,max_len,256
+        # init_reference_out: b,topk,4
+        # inter_references_out: decoder layer num,b,topk,4
+        # enc_outputs_class: b,hw,1
+        # enc_outputs_coord_unact: b,hw,4
+        return (
+            hs,
+            hs_text,
+            init_reference_out,  # reference points
+            inter_references_out,
+            enc_outputs_class,
+            enc_outputs_coord_unact,
+        )
+
+class DeformableTransformerNumPoint(nn.Module):
+    def __init__(
+        self,
+        d_model=256,
+        nhead=8,
+        num_encoder_layers=6,
+        num_decoder_layers=6,
+        dim_feedforward=1024,
+        dropout=0.1,
+        activation="relu",
+        return_intermediate_dec=False,
+        num_feature_levels=4,
+        dec_n_points=4,
+        enc_n_points=4,
+        num_proposals=300,
+    ):
+        super().__init__()
+
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_proposals = num_proposals
+
+        encoder_layer = DeformableTransformerEncoderLayer(
+            d_model,
+            dim_feedforward,
+            dropout,
+            activation,
+            num_feature_levels,
+            nhead,
+            enc_n_points,
+        )
+        self.encoder = DeformableTransformerEncoder(encoder_layer, num_encoder_layers)
+
+        decoder_layer = DeformableCompositeTransformerDecoderLayer(
+            d_model,
+            dim_feedforward,
+            dropout,
+            activation,
+            num_feature_levels,
+            nhead,
+            dec_n_points,
+        )
+        self.decoder = DeformableCompositeTransformerDecoder(
+            decoder_layer, num_decoder_layers, return_intermediate_dec
+        )
+
+        self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
+
+        self.bbox_class_embed = None
+        self.bbox_embed = None
+        self.enc_output = nn.Linear(d_model, d_model)
+        self.enc_output_norm = nn.LayerNorm(d_model)
+        self.pos_trans = nn.Linear(d_model, d_model)
+        self.pos_trans_norm = nn.LayerNorm(d_model)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        for m in self.modules():
+            if isinstance(m, MSDeformAttn):
+                m._reset_parameters()
+        normal_(self.level_embed)
+
+    def get_proposal_pos_embed(self, proposals):
+        num_pos_feats = 128
+        temperature = 10000
+        scale = 2 * math.pi
+
+        dim_t = torch.arange(
+            num_pos_feats, dtype=torch.float32, device=proposals.device
+        )
+        dim_t = temperature ** (
+            2 * torch.div(dim_t, 2, rounding_mode="trunc") / num_pos_feats
+        )
+        # N, L, 2
+        proposals = proposals.sigmoid() * scale
+        # N, L, 2, 64
+        pos = proposals[:, :, :, None] / dim_t
+        # N, L, 2, 32, 2 -> N,L,256
+        pos = torch.stack(
+            (pos[:, :, :, 0::2].sin(), pos[:, :, :, 1::2].cos()), dim=4
+        ).flatten(2)
+        return pos
+
+    def gen_encoder_output_proposals(
+        self,
+        memory: torch.Tensor,
+        memory_padding_mask: torch.Tensor,
+        spatial_shapes: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """_summary_
+
+        Args:
+            memory (torch.Tensor): b,hw,c image feature
+            memory_padding_mask (torch.Tensor): b,hw padding mask
+            spatial_shapes (torch.Tensor): feature level, size each feature level size
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tenosr]:
+            - output_memory (torch.Tensor): b,all hw,c image feature
+            - output_proposals (torch.Tensor): b,all hw,2 each proposals prior,format is xy.
+        """
+        N_, S_, C_ = memory.shape  # b,hw,c
+        base_scale = 4.0
+        proposals = []
+        _cur = 0
+        for lvl, (H_, W_) in enumerate(spatial_shapes):
+            # mark the out of image region to 0
+            mask_flatten_ = memory_padding_mask[:, _cur : (_cur + H_ * W_)].view(
+                N_, H_, W_, 1
+            )
+            # cout how much each image padding, shape:b
+            valid_H = torch.sum(~mask_flatten_[:, :, 0, 0], 1)
+            valid_W = torch.sum(~mask_flatten_[:, 0, :, 0], 1)
+
+            # h,w
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(
+                    0, H_ - 1, H_, dtype=torch.float32, device=memory.device
+                ),
+                torch.linspace(
+                    0, W_ - 1, W_, dtype=torch.float32, device=memory.device
+                ),
+            )
+            # current shape level :H,W,2
+            grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)
+
+            scale = torch.cat([valid_W.unsqueeze(-1), valid_H.unsqueeze(-1)], 1).view(
+                N_, 1, 1, 2
+            )
+            grid = (grid.unsqueeze(0).expand(N_, -1, -1, -1) + 0.5) / scale
+            proposal = grid.view(N_, -1, 2)
+            proposals.append(proposal)
+            _cur += H_ * W_
+
+        # b,all shape level hw,2
+        output_proposals = torch.cat(proposals, 1)
+        output_proposals_valid = (
+            (output_proposals > 0.01) & (output_proposals < 0.99)
+        ).all(-1, keepdim=True)
+        # QUE: 应用sigmoid 逆函数?
+        output_proposals = torch.log(output_proposals / (1 - output_proposals))
+        output_proposals = output_proposals.masked_fill(
+            memory_padding_mask.unsqueeze(-1), float("inf")
+        )
+        output_proposals = output_proposals.masked_fill(
+            ~output_proposals_valid, float("inf")
+        )
+
+        output_memory = memory
+        output_memory = output_memory.masked_fill(
+            memory_padding_mask.unsqueeze(-1), float(0)
+        )
+        output_memory = output_memory.masked_fill(~output_proposals_valid, float(0))
+        # linea trans -> layer norm
+        output_memory = self.enc_output_norm(self.enc_output(output_memory))
+        return output_memory, output_proposals
+
+    def get_valid_ratio(self, mask):
+        _, H, W = mask.shape
+        valid_H = torch.sum(~mask[:, :, 0], 1)
+        valid_W = torch.sum(~mask[:, 0, :], 1)
+        valid_ratio_h = valid_H.float() / H
+        valid_ratio_w = valid_W.float() / W
+        valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
+        return valid_ratio
+
+    def forward(
+        self,
+        srcs,
+        masks,
+        pos_embeds,  # image feature pos encode
+        query_embed,  # control point query
+        text_embed,  # text feature query
+        text_pos_embed,
+        text_mask=None,
+    ):
+        # prepare input for encoder
+        src_flatten = []
+        mask_flatten = []
+        lvl_pos_embed_flatten = []
+        spatial_shapes = []
+        for lvl, (src, mask, pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
+            bs, c, h, w = src.shape
+            spatial_shape = (h, w)
+            spatial_shapes.append(spatial_shape)
+            src = src.flatten(2).transpose(1, 2)  # b,hw,c
+            mask = mask.flatten(1)
+            pos_embed = pos_embed.flatten(2).transpose(1, 2)
+            # 这是一个可学习的特征层级编码
+            lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+            lvl_pos_embed_flatten.append(lvl_pos_embed)
+            src_flatten.append(src)
+            mask_flatten.append(mask)
+        # 将特征空间维度展平，然后在空间维度上把所有特征堆叠在一起
+        # 空间维度数量h*w 是token数量,通道之前已经统一,是token dim
+        src_flatten = torch.cat(src_flatten, 1)
+        mask_flatten = torch.cat(mask_flatten, 1)
+        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
+        spatial_shapes = torch.as_tensor(
+            spatial_shapes, dtype=torch.long, device=src_flatten.device
+        )
+        level_start_index = torch.cat(
+            (spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1])
+        )
+        valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
+
+        # encoder
+        memory = self.encoder(
+            src_flatten,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+            lvl_pos_embed_flatten,
+            mask_flatten,
+        )
+
+        # prepare input for decoder
+        bs, _, c = memory.shape  # b,hw,c
+        # b,hw,c;b,hw;feature level,size -> b,hw,256;b,hw,2
+        output_memory, output_proposals = self.gen_encoder_output_proposals(
+            memory, mask_flatten, spatial_shapes
+        )
+
+        # hack implementation for two-stage Deformable DETR
+        # here self.bbox_class_embed=nn.Linear(in_features=256, out_features=1, bias=True)
+        # self.bbox_class_embed init in ../../modeling/testr/models.py line 86
+        # self.bbox_class = nn.Linear(self.d_model, self.num_classes)
+        enc_outputs_class = self.bbox_class_embed(output_memory)
+        # here self.bbox_embed is 3 mlp,256 -> 4.
+        # self.bbox_embed init in ../../modeling/testr/models.py line 85
+        # self.bbox_coord = MLP(self.d_model, self.d_model, 2, 3)
+        # enc_outputs_coord_unact: b,hw,2
+        enc_outputs_coord_unact = self.bbox_embed(output_memory) + output_proposals
+
+        topk = self.num_proposals
+        # topk_proposals is the topk proposals index
+        # topk_proposals:b,topk
+        topk_proposals = torch.topk(enc_outputs_class[..., 0], topk, dim=1)[1]
+        # topk_coords_unact: b,topk,2
+        topk_coords_unact = torch.gather(
+            enc_outputs_coord_unact, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 2)
+        )
+        topk_coords_unact = topk_coords_unact.detach()
+        reference_points = topk_coords_unact.sigmoid()
+        init_reference_out = reference_points
+        # query_pos = self.pos_trans_norm(
+        #     self.pos_trans(self.get_proposal_pos_embed(topk_coords_unact))
+        # )
+        query_pos_t=self.get_proposal_pos_embed(topk_coords_unact)
+        query_pos_t=self.pos_trans(query_pos_t)
+        query_pos=self.pos_trans_norm(query_pos_t)
+        query_embed = query_embed.unsqueeze(0).expand(bs, -1, -1, -1)
+        # b,100,c-> b,100,1,c
+        query_pos = query_pos[:, :, None, :].repeat(1, 1, query_embed.shape[2], 1)
+        text_embed = text_embed.unsqueeze(0).expand(bs, -1, -1, -1)
+
+        # decoder
+        hs, hs_text, inter_references = self.decoder(
+            query_embed,
+            text_embed,
+            reference_points,
+            memory,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+            query_pos,
+            text_pos_embed,
+            mask_flatten,
+            text_mask,
+        )
+
+        inter_references_out = inter_references
+        # hs: decoder layer num,b,topk,1,256
+        # hs_text: decoder layer num,b,topk,max_len,256
+        # init_reference_out: b,topk,2
+        # inter_references_out: decoder layer num,b,topk,2
+        # enc_outputs_class: b,hw,1
+        # enc_outputs_coord_unact: b,hw,2
+        return (
+            hs,
+            hs_text,
+            init_reference_out,  # reference points
+            inter_references_out,
+            enc_outputs_class,
+            enc_outputs_coord_unact,
+        )

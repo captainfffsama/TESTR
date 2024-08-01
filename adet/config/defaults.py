@@ -63,7 +63,7 @@ _C.MODEL.FCOS.NUM_BOX_CONVS = 4
 _C.MODEL.FCOS.NUM_SHARE_CONVS = 0
 _C.MODEL.FCOS.CENTER_SAMPLE = True
 _C.MODEL.FCOS.POS_RADIUS = 1.5
-_C.MODEL.FCOS.LOC_LOSS_TYPE = 'giou'
+_C.MODEL.FCOS.LOC_LOSS_TYPE = "giou"
 _C.MODEL.FCOS.YIELD_PROPOSAL = False
 _C.MODEL.FCOS.YIELD_BOX_FEATURES = False
 
@@ -107,7 +107,7 @@ _C.MODEL.BATEXT.RECOGNIZER = "attn"
 _C.MODEL.BATEXT.CANONICAL_SIZE = 96  # largest min_size for level 3 (stride=8)
 _C.MODEL.BATEXT.USE_COORDCONV = False
 _C.MODEL.BATEXT.USE_AET = False
-_C.MODEL.BATEXT.CUSTOM_DICT = "" # Path to the class file.
+_C.MODEL.BATEXT.CUSTOM_DICT = ""  # Path to the class file.
 
 # ---------------------------------------------------------------------------- #
 # BlendMask Options
@@ -178,7 +178,7 @@ _C.MODEL.MEInst.NUM_BOX_CONVS = 4
 _C.MODEL.MEInst.NUM_SHARE_CONVS = 0
 _C.MODEL.MEInst.CENTER_SAMPLE = True
 _C.MODEL.MEInst.POS_RADIUS = 1.5
-_C.MODEL.MEInst.LOC_LOSS_TYPE = 'giou'
+_C.MODEL.MEInst.LOC_LOSS_TYPE = "giou"
 
 # ---------------------------------------------------------------------------- #
 # Mask Encoding
@@ -203,8 +203,10 @@ _C.MODEL.MEInst.NUM_MASK_CONVS = 4
 _C.MODEL.MEInst.DIM_MASK = 60
 _C.MODEL.MEInst.MASK_SIZE = 28
 # The default path for parameters of mask encoding.
-_C.MODEL.MEInst.PATH_COMPONENTS = "datasets/coco/components/" \
-                                   "coco_2017_train_class_agnosticTrue_whitenTrue_sigmoidTrue_60.npz"
+_C.MODEL.MEInst.PATH_COMPONENTS = (
+    "datasets/coco/components/"
+    "coco_2017_train_class_agnosticTrue_whitenTrue_sigmoidTrue_60.npz"
+)
 # An indicator for encoding parameters loading during training.
 _C.MODEL.MEInst.FLAG_PARAMETERS = False
 # The loss for mask branch, can be mse now.
@@ -289,7 +291,13 @@ _C.MODEL.SOLOV2 = CN()
 # Instance hyper-parameters
 _C.MODEL.SOLOV2.INSTANCE_IN_FEATURES = ["p2", "p3", "p4", "p5", "p6"]
 _C.MODEL.SOLOV2.FPN_INSTANCE_STRIDES = [8, 8, 16, 32, 32]
-_C.MODEL.SOLOV2.FPN_SCALE_RANGES = ((1, 96), (48, 192), (96, 384), (192, 768), (384, 2048))
+_C.MODEL.SOLOV2.FPN_SCALE_RANGES = (
+    (1, 96),
+    (48, 192),
+    (96, 384),
+    (192, 768),
+    (384, 2048),
+)
 _C.MODEL.SOLOV2.SIGMA = 0.2
 # Channel size for the instance head.
 _C.MODEL.SOLOV2.INSTANCE_IN_CHANNELS = 256
@@ -297,7 +305,7 @@ _C.MODEL.SOLOV2.INSTANCE_CHANNELS = 512
 # Convolutions to use in the instance head.
 _C.MODEL.SOLOV2.NUM_INSTANCE_CONVS = 4
 _C.MODEL.SOLOV2.USE_DCN_IN_INSTANCE = False
-_C.MODEL.SOLOV2.TYPE_DCN = 'DCN'
+_C.MODEL.SOLOV2.TYPE_DCN = "DCN"
 _C.MODEL.SOLOV2.NUM_GRIDS = [40, 36, 24, 16, 12]
 # Number of foreground classes.
 _C.MODEL.SOLOV2.NUM_CLASSES = 80
@@ -356,6 +364,7 @@ _C.MODEL.TRANSFORMER.DEC_N_POINTS = 4
 _C.MODEL.TRANSFORMER.POSITION_EMBEDDING_SCALE = 6.283185307179586  # 2 PI
 _C.MODEL.TRANSFORMER.NUM_FEATURE_LEVELS = 4
 _C.MODEL.TRANSFORMER.NUM_CTRL_POINTS = 8
+
 
 _C.MODEL.TRANSFORMER.LOSS = CN()
 _C.MODEL.TRANSFORMER.LOSS.AUX_LOSS = True

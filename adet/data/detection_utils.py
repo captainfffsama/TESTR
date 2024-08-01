@@ -1,19 +1,20 @@
 import logging
+from copy import deepcopy
 
 import numpy as np
 import torch
 
 from detectron2.data import transforms as T
-from detectron2.data.detection_utils import \
-    annotations_to_instances as d2_anno_to_inst
-from detectron2.data.detection_utils import \
-    transform_instance_annotations as d2_transform_inst_anno
+from detectron2.data.detection_utils import annotations_to_instances as d2_anno_to_inst
+from detectron2.data.detection_utils import (
+    transform_instance_annotations as d2_transform_inst_anno,
+)
 
 
 def transform_instance_annotations(
     annotation, transforms, image_size, *, keypoint_hflip_indices=None
 ):
-
+    # only change annotation bbox
     annotation = d2_transform_inst_anno(
         annotation,
         transforms,
@@ -71,7 +72,7 @@ def annotations_to_instances(annos, image_size, mask_format="polygon"):
 
     if "polygons" in annos[0]:
         polys = [obj.get("polygons", []) for obj in annos]
-        polys=np.stack(polys)
+        polys = np.stack(polys)
         instance.polygons = torch.as_tensor(polys, dtype=torch.float32)
 
     return instance
